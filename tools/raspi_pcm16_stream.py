@@ -263,8 +263,6 @@ def main():
         try:
             with serial.Serial(args.port, SERIAL_BAUD, timeout=0.2, write_timeout=1) as port:
                 time.sleep(0.5)
-                port.reset_input_buffer()
-                port.reset_output_buffer()
                 start_stream(port)
 
                 while target_frames is None or received < target_frames:
