@@ -21,11 +21,12 @@ COMMAND=(
   "$PROJECT_DIR/.venv/bin/python"
   "$PROJECT_DIR/tools/raspi_pcm16_stream.py"
   --port "$SERIAL_PORT"
+  --speaker mix
   --volume "$VOLUME"
 )
 
 if [[ -n "$ALSA_DEVICE" ]]; then
-  COMMAND+=(--device "$ALSA_DEVICE")
+  COMMAND+=(--speaker-device "$ALSA_DEVICE")
 fi
 
 exec "${COMMAND[@]}"
