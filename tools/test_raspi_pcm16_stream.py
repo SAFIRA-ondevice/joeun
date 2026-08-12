@@ -95,6 +95,13 @@ class StartupTests(unittest.TestCase):
 
         self.assertEqual(stream.PacketReader().read(port), (21, payload))
 
+    def test_startup_does_not_require_usb_purge_methods(self):
+        port = FakePort(b"STARTED\n")
+
+        stream.start_stream(port)
+
+        self.assertEqual(port.writes, [b"START_INMP_ONLY\n"])
+
 
 class AlsaPlaybackTests(unittest.TestCase):
     @patch("raspi_pcm16_stream.subprocess.Popen")
