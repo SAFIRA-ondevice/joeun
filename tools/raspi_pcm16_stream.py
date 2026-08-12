@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Play the three-channel SAFIRA M3C0 stream as a real-time mono ALSA mix."""
+"""Play the ESP32 three-channel M3C0 PCM16 stream on a Raspberry Pi."""
 
 import argparse
-import array
-import shutil
 import struct
 import subprocess
 import sys
 import time
+import wave
+from contextlib import ExitStack
 
 
 MIC_MAGIC = b"M3C0"
@@ -20,6 +20,11 @@ INPUT_CHANNELS = 3
 SERIAL_BAUD = 2_000_000
 MIC_PAYLOAD_BYTES = FRAME_SAMPLES * INPUT_CHANNELS * 2
 MIC_PACKET_BYTES = HEADER.size + MIC_PAYLOAD_BYTES
+CHANNEL_NAMES = ("ambient_left", "ambient_right", "voice")
+
+
+def clamp16(value):
+    return max(-32768, min(32767, int(value)))
 
 
 class PacketReader:
@@ -33,12 +38,12 @@ class PacketReader:
     def _pop(self):
         while True:
             locations = [
-                (at, magic)
+                (offset, magic)
                 for magic in (MIC_MAGIC, DBG_MAGIC)
-                if (at := self.buffer.find(magic)) >= 0
+                if (offset := self.buffer.find(magic)) >= 0
             ]
             if not locations:
-                keep = len(MIC_MAGIC) - 1
+                keep = max(len(MIC_MAGIC), len(DBG_MAGIC)) - 1
                 if len(self.buffer) > keep:
                     self.resync_bytes += len(self.buffer) - keep
                     del self.buffer[:-keep]
@@ -81,115 +86,212 @@ class PacketReader:
         if prefetched:
             self.buffer.extend(prefetched)
             port._safira_prefetched = b""
-
         while True:
             packet = self._pop()
             if packet is not None:
                 return packet
-            chunk = port.read(max(1, getattr(port, "in_waiting", 0) or 1))
+            chunk = port.read(max(1, port.in_waiting or 1))
             if not chunk:
                 raise TimeoutError("M3C0 packet timeout")
             self.buffer.extend(chunk)
 
 
+def _print_startup_line(line_buffer):
+    if not line_buffer:
+        return False
+    line = line_buffer.decode("ascii", errors="ignore").strip()
+    if line:
+        print(f"ESP32: {line}")
+    return line == "STARTED"
+
+
 def start_stream(port):
-    """Start firmware output, or accept a device that is already sending binary."""
-    command = b"START_INMP_ONLY\n"
-    port.write(command)
     deadline = time.monotonic() + 8.0
-    received = bytearray()
+    command = b"START_INMP_ONLY\n"
+    last_send = 0.0
+    line_buffer = bytearray()
+    packet_probe = bytearray()
 
     while time.monotonic() < deadline:
-        chunk = port.readline()
+        now = time.monotonic()
+        if now - last_send >= 1.0:
+            port.write(command)
+            last_send = now
+
+        chunk = port.read(max(1, port.in_waiting or 1))
         if not chunk:
             continue
-        received.extend(chunk)
-        magic_at = received.find(MIC_MAGIC)
-        if magic_at >= 0:
-            port._safira_prefetched = bytes(received[magic_at:])
+
+        packet_probe.extend(chunk)
+        magic_offsets = [
+            offset
+            for magic in (MIC_MAGIC, DBG_MAGIC)
+            if (offset := packet_probe.find(magic)) >= 0
+        ]
+        if magic_offsets:
+            magic_at = min(magic_offsets)
+            port._safira_prefetched = bytes(packet_probe[magic_at:])
+            print("ESP32 is already streaming M3C0 audio; continuing.")
             return
-        for line in received.splitlines():
-            if line.strip() == b"STARTED":
-                return
-        if len(received) > 4096:
-            del received[:-3]
+        del packet_probe[:-3]
 
-    raise TimeoutError("ESP32 did not answer STARTED or send an M3C0 packet")
+        for value in chunk:
+            if value in (10, 13):
+                if _print_startup_line(line_buffer):
+                    return
+                line_buffer.clear()
+            elif 32 <= value <= 126:
+                if len(line_buffer) < 128:
+                    line_buffer.append(value)
+            else:
+                line_buffer.clear()
 
-
-def mix_channels(payload, volume=1.0):
-    if len(payload) != MIC_PAYLOAD_BYTES:
-        raise ValueError(f"expected {MIC_PAYLOAD_BYTES} PCM bytes, got {len(payload)}")
-    if volume < 0:
-        raise ValueError("volume must be non-negative")
-
-    samples = array.array("h")
-    samples.frombytes(payload)
-    if sys.byteorder != "little":
-        samples.byteswap()
-
-    mono = array.array("h")
-    for index in range(0, len(samples), INPUT_CHANNELS):
-        mixed = round(sum(samples[index:index + INPUT_CHANNELS]) / INPUT_CHANNELS * volume)
-        mono.append(max(-32768, min(32767, mixed)))
-    if sys.byteorder != "little":
-        mono.byteswap()
-    return mono.tobytes()
+    raise TimeoutError("ESP32 did not answer STARTED or begin M3C0 streaming")
 
 
-def open_aplay(device=None):
-    if shutil.which("aplay") is None:
-        raise RuntimeError("aplay not found; install it with: sudo apt install alsa-utils")
-    command = ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(SAMPLE_RATE), "-c", "1"]
-    if device:
-        command.extend(["-D", device])
-    return subprocess.Popen(command, stdin=subprocess.PIPE)
+def split_channels(payload):
+    samples = struct.unpack("<" + "h" * (FRAME_SAMPLES * INPUT_CHANNELS), payload)
+    return tuple(samples[channel::INPUT_CHANNELS] for channel in range(INPUT_CHANNELS))
+
+
+def pack_pcm16(samples):
+    return struct.pack("<" + "h" * len(samples), *samples)
+
+
+def mix_channels(payload, volume):
+    samples = struct.unpack("<" + "h" * (FRAME_SAMPLES * INPUT_CHANNELS), payload)
+    volume = max(0.0, volume)
+    mixed = []
+    for index in range(FRAME_SAMPLES):
+        base = index * INPUT_CHANNELS
+        value = sum(samples[base:base + INPUT_CHANNELS]) // INPUT_CHANNELS
+        mixed.append(clamp16(value * volume))
+    return pack_pcm16(mixed)
+
+
+class AlsaPlayback:
+    def __init__(self, device=""):
+        command = ["aplay", "-q", "-t", "raw"]
+        if device:
+            command.extend(("-D", device))
+        command.extend(("-f", "S16_LE", "-c", "1", "-r", str(SAMPLE_RATE)))
+        try:
+            self.process = subprocess.Popen(command, stdin=subprocess.PIPE)
+        except FileNotFoundError as error:
+            raise RuntimeError("aplay is not installed; install alsa-utils on the Raspberry Pi") from error
+
+    def write(self, pcm):
+        if self.process.poll() is not None:
+            raise RuntimeError("aplay exited before audio could be played")
+        try:
+            self.process.stdin.write(pcm)
+            self.process.stdin.flush()
+        except BrokenPipeError as error:
+            raise RuntimeError("aplay stopped accepting PCM16 audio") from error
+
+    def close(self):
+        if self.process.stdin and not self.process.stdin.closed:
+            self.process.stdin.close()
+        try:
+            return self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.process.terminate()
+            return self.process.wait(timeout=2)
+
+
+def open_wavs(stack, prefix):
+    if not prefix:
+        return []
+    base = prefix[:-4] if prefix.lower().endswith(".wav") else prefix
+    wavs = []
+    for name in CHANNEL_NAMES:
+        wav = stack.enter_context(wave.open(f"{base}_{name}.wav", "wb"))
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(SAMPLE_RATE)
+        wavs.append(wav)
+    return wavs
+
+
+def write_wavs(wavs, payload):
+    if not wavs:
+        return
+    for wav, samples in zip(wavs, split_channels(payload)):
+        wav.writeframesraw(pack_pcm16(samples))
+
+
+def print_status(received, missing, reader, started_at):
+    audio_seconds = received * FRAME_SAMPLES / SAMPLE_RATE
+    elapsed = time.monotonic() - started_at
+    print(
+        f"audio={audio_seconds:.1f}s wall={elapsed:.1f}s missing={missing} "
+        f"bad_headers={reader.bad_headers} resync={reader.resync_bytes}B "
+        f"debug={reader.debug_packets}"
+    )
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Play the SAFIRA ESP32 microphone mix through Raspberry Pi ALSA.")
-    parser.add_argument("--port", required=True, help="Example: /dev/ttyUSB0 or /dev/ttyACM0")
-    parser.add_argument("--volume", type=float, default=1.0)
-    parser.add_argument("--device", help="Optional ALSA device, for example plughw:0,0")
+    parser = argparse.ArgumentParser(
+        description="Receive ESP32 M3C0 PCM16 frames and play a 3-channel mix on Raspberry Pi."
+    )
+    parser.add_argument("--port", default="/dev/ttyUSB0", help="ESP32 serial port, for example /dev/ttyUSB0")
+    parser.add_argument("--seconds", type=float, default=0.0, help="0 means play until Ctrl+C")
+    parser.add_argument("--save-prefix", default="", help="Optional WAV filename prefix for all 3 channels")
+    parser.add_argument("--speaker", choices=("none", "mix"), default="mix")
+    parser.add_argument("--speaker-device", default="", help="Optional ALSA device passed to aplay -D")
+    parser.add_argument("--volume", type=float, default=1.0, help="3-channel mix gain; default: 1.0")
     args = parser.parse_args()
+    if args.seconds < 0:
+        parser.error("--seconds must be zero or positive")
 
     try:
         import serial
     except ImportError:
-        sys.exit("pyserial is missing; run: python3 -m pip install -r requirements.txt")
+        sys.exit("pyserial is missing; run: python3 -m pip install pyserial")
 
-    player = open_aplay(args.device)
+    target_frames = None if args.seconds == 0 else max(1, round(args.seconds * SAMPLE_RATE / FRAME_SAMPLES))
     reader = PacketReader()
-    previous_sequence = None
+    received = 0
     missing = 0
-    frames = 0
+    previous_sequence = None
+    started_at = time.monotonic()
+    last_status_at = started_at
 
-    try:
-        with serial.Serial(args.port, SERIAL_BAUD, timeout=0.2, write_timeout=1) as port:
-            time.sleep(0.5)
-            port.reset_input_buffer()
-            port.reset_output_buffer()
-            start_stream(port)
-            port.timeout = 2.0
-            print("Playing 16 kHz mono mix. Press Ctrl+C to stop.")
-            while True:
-                sequence, payload = reader.read(port)
-                if previous_sequence is not None:
-                    gap = (sequence - previous_sequence - 1) & 0xFFFF
-                    if 0 < gap < 1000:
-                        missing += gap
-                previous_sequence = sequence
-                player.stdin.write(mix_channels(payload, args.volume))
-                frames += 1
-                if frames % 50 == 0:
-                    player.stdin.flush()
-                    print(f"audio={frames * 0.02:.0f}s missing={missing} resync={reader.resync_bytes}B")
-    except KeyboardInterrupt:
-        print("\nStopped.")
-    finally:
-        if player.stdin:
-            player.stdin.close()
-        player.wait(timeout=3)
+    with ExitStack() as stack:
+        wavs = open_wavs(stack, args.save_prefix)
+        playback = AlsaPlayback(args.speaker_device) if args.speaker == "mix" else None
+        try:
+            with serial.Serial(args.port, SERIAL_BAUD, timeout=0.2, write_timeout=1) as port:
+                time.sleep(0.5)
+                port.reset_input_buffer()
+                port.reset_output_buffer()
+                start_stream(port)
+
+                while target_frames is None or received < target_frames:
+                    sequence, payload = reader.read(port)
+                    if previous_sequence is not None:
+                        gap = (sequence - previous_sequence - 1) & 0xFFFF
+                        if 0 < gap < 1000:
+                            missing += gap
+                    previous_sequence = sequence
+
+                    write_wavs(wavs, payload)
+                    if playback:
+                        playback.write(mix_channels(payload, args.volume))
+                    received += 1
+
+                    if time.monotonic() - last_status_at >= 1.0:
+                        print_status(received, missing, reader, started_at)
+                        last_status_at = time.monotonic()
+        except KeyboardInterrupt:
+            print("\nstopped")
+        finally:
+            if playback:
+                return_code = playback.close()
+                if return_code not in (0, None):
+                    print(f"warning: aplay exited with status {return_code}", file=sys.stderr)
+
+    print_status(received, missing, reader, started_at)
 
 
 if __name__ == "__main__":
