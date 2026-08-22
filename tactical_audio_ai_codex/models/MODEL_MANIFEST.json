@@ -1,0 +1,9 @@
+{
+  "model_binaries_included": false,
+  "searched_extensions": [".pt", ".pth", ".onnx", ".tflite"],
+  "legacy_expected_path": "/home/pi/tactical_audio_ai/models/audio_cnn_best.pt",
+  "legacy_status": "missing_from_package_and_known_label_contamination",
+  "recommended_expected_path": "/home/pi/tactical_audio_ai/models/audio_cnn_4class_best.pt",
+  "recommended_status": "must_be_trained",
+  "recommended_classes": ["speech", "drone", "gunshot", "background"]
+}
