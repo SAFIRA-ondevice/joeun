@@ -5,5 +5,9 @@
   "legacy_status": "missing_from_package_and_known_label_contamination",
   "recommended_expected_path": "/home/pi/tactical_audio_ai/models/audio_cnn_4class_best.pt",
   "recommended_status": "must_be_trained",
-  "recommended_classes": ["speech", "drone", "gunshot", "background"]
+  "recommended_classes": ["speech", "drone", "gunshot", "background"],
+  "multilabel_expected_path": "/home/pi/tactical_audio_ai/models/audio_cnn_multilabel_best.pt",
+  "multilabel_status": "must_be_trained",
+  "multilabel_outputs": ["speech", "drone", "gunshot"],
+  "open_set_fallback": "optional YAMNet AudioSet model"
 }
