@@ -39,6 +39,21 @@
 8. 새 체크포인트를 `audio_cnn_4class_best.pt`로 연결한다.
 9. 이후 helicopter/fighter를 추가하고, 동시 사건이 필요하면 softmax 대신 sigmoid multi-label로 전환한다.
 
+## 2026-09-04 고도화 코드
+
+- `training/train_multilabel_cnn.py`: 독립 sigmoid 출력, BCE loss, 1–3개 타깃 및 background SNR 혼합
+- `raspberry_pi/live_m3c0_multilabel.py`: 클래스별 확률, 시간 smoothing, 다중 이벤트 출력
+- `raspberry_pi/audioset_fallback.py`: 타깃 미검출 시에만 YAMNet/AudioSet 보조 추정
+- 판정 계층: 타깃 하나 이상 감지 → 복합 결과 / 타깃 없음+YAMNet 확신 → `추정:` / 둘 다 없음 → `UNKNOWN`
+- Raspberry Pi의 최신 torchaudio가 WAV 로딩에 TorchCodec을 요구하므로 `training/audio_io.py`의 SoundFile 로더를 사용한다. TorchCodec은 필요하지 않다.
+- training `epoch_size`가 전체 파일 수보다 작아도 클래스가 파일 정렬 순서에 치우치지 않도록 학습 base sample을 무작위 선택한다.
+
+새 권장 체크포인트 경로:
+
+```text
+/home/pi/tactical_audio_ai/models/audio_cnn_multilabel_best.pt
+```
+
 ## Codex에 줄 첫 요청
 
 “`CODEX_CONTINUE.md`를 읽고 Raspberry Pi의 실제 MAD annotation 형식과 기존 체크포인트 구조를 검사한 뒤, dry-run 결과를 근거로 gunshot-only 추출과 4-class 재학습을 진행해줘. 기존 데이터는 삭제하지 마.”

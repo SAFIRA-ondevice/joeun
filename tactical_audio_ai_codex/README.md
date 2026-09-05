@@ -16,11 +16,23 @@ pip install -r requirements.txt
 python training/prepare_dataset.py --source data_raw --output dataset --classes speech drone gunshot background
 python training/split_dataset.py --input dataset --output splits --classes speech drone gunshot background --balance-min
 
-# 2) 학습
+# 2) 복합음 multi-label 학습
+python training/train_multilabel_cnn.py --data splits --output models/audio_cnn_multilabel_best.pt
+
+# 기존 단일 선택 baseline이 필요할 때만 사용
 python training/train_audio_cnn.py --data splits --output models/audio_cnn_4class_best.pt
 
-# 3) 실시간 추론
-python raspberry_pi/live_m3c0_ai.py --port /dev/ttyUSB1 --model models/audio_cnn_4class_best.pt
+# 3) 각 대상의 독립 확률 출력
+python raspberry_pi/live_m3c0_multilabel.py \
+  --port /dev/ttyUSB1 \
+  --model models/audio_cnn_multilabel_best.pt
+
+# 4) 대상이 없을 때 AudioSet/YAMNet 521종으로 보조 추정
+pip install -r requirements-audioset.txt
+python raspberry_pi/live_m3c0_multilabel.py \
+  --port /dev/ttyUSB1 \
+  --model models/audio_cnn_multilabel_best.pt \
+  --yamnet
 ```
 
 상세 현황과 다음 작업은 `CODEX_CONTINUE.md`를 먼저 읽으세요.
@@ -33,3 +45,13 @@ python raspberry_pi/live_m3c0_ai.py --port /dev/ttyUSB1 --model models/audio_cnn
 - `docs/`: 프로토콜 및 데이터셋 메모
 
 데이터셋은 라이선스와 용량 문제로 포함하지 않았습니다.
+
+출력 예시:
+
+```text
+[AI] speech= 81.2% | drone= 74.5% | gunshot=  3.1% | => SPEECH + DRONE
+[AI] speech=  4.2% | drone=  8.1% | gunshot=  1.9% | => 추정: Siren
+[AI] speech=  2.0% | drone=  3.1% | gunshot=  1.2% | => UNKNOWN
+```
+
+퍼센트는 서로 독립이므로 합이 100%일 필요가 없습니다. 운영 전 클래스별 threshold를 별도 검증 세트로 보정해야 합니다.
