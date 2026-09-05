@@ -4,20 +4,20 @@ from pathlib import Path
 import soundfile as sf
 import torch
 import torchaudio
+from audio_io import load_mono
 
 AUDIO_EXT = {".wav", ".flac", ".ogg"}
 
 def convert(src: Path, dst: Path, sr: int, seconds: float):
-    wav, old_sr = torchaudio.load(src)
-    wav = wav.mean(0, keepdim=True)
+    wav, old_sr = load_mono(src)
     if old_sr != sr:
         wav = torchaudio.functional.resample(wav, old_sr, sr)
     size = int(sr * seconds)
-    wav = wav[:, :size]
-    if wav.shape[1] < size:
-        wav = torch.nn.functional.pad(wav, (0, size - wav.shape[1]))
+    wav = wav[:size]
+    if wav.shape[0] < size:
+        wav = torch.nn.functional.pad(wav, (0, size - wav.shape[0]))
     dst.parent.mkdir(parents=True, exist_ok=True)
-    sf.write(dst, wav.squeeze(0).numpy(), sr, subtype="PCM_16")
+    sf.write(dst, wav.numpy(), sr, subtype="PCM_16")
 
 def main():
     p = argparse.ArgumentParser(description="Convert class folders to fixed mono PCM16 WAV files")

@@ -9,6 +9,7 @@ from torch.utils.data import Dataset, DataLoader
 
 sys.path.insert(0,str(Path(__file__).parent))
 from audio_model import AudioCNN
+from audio_io import load_mono
 
 class AudioFolder(Dataset):
     def __init__(self,root,classes,sr=16000,seconds=1.0,augment=False):
@@ -16,7 +17,7 @@ class AudioFolder(Dataset):
         self.items=[(p,i) for i,c in enumerate(classes) for p in sorted((root/c).glob("*.wav"))]
     def __len__(self): return len(self.items)
     def __getitem__(self,i):
-        p,y=self.items[i]; x,old=torchaudio.load(p); x=x.mean(0)
+        p,y=self.items[i]; x,old=load_mono(p)
         if old!=self.sr: x=torchaudio.functional.resample(x,old,self.sr)
         if self.augment and len(x)>self.size:
             start=random.randint(0,len(x)-self.size); x=x[start:start+self.size]
