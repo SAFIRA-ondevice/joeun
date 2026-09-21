@@ -55,3 +55,34 @@ python raspberry_pi/live_m3c0_multilabel.py \
 ```
 
 퍼센트는 서로 독립이므로 합이 100%일 필요가 없습니다. 운영 전 클래스별 threshold를 별도 검증 세트로 보정해야 합니다.
+
+
+## SAFIRA DSP / full-duplex routing
+
+최신 프로토타입은 3번째 `voice` 마이크를 speech 판정과 사용자 음성 uplink에 사용합니다.
+환경음은 ambient L/R 평균을 사용합니다.
+
+증감/라우팅 정책:
+
+- separated gunshot ×0.15 → local headset
+- separated drone ×1.50 → local headset
+- user voice ×1.00 → server
+- unknown ×0.00 → local headset
+- server voice ×1.00 → local headset
+
+통신 오디오 규격은 `16 kHz / S16LE / mono / 20 ms / 320 samples / 640 bytes`이고,
+UDP 전송 시 `SPK0` 8-byte header를 붙여 총 648 bytes입니다.
+
+현재 CNN은 source separation 모델이 아니라 multi-label classifier입니다. 따라서 실제 분리 PCM이
+없는 상태에서는 `classification_guided_mixed_fallback`을 사용하며, 이를 separated audio라고
+표시하지 않습니다. 실제 separator가 추가되면 `SafiraAudioRouter.headset_from_separated()`
+경로로 교체합니다.
+
+관련 파일:
+
+- `raspberry_pi/audio_dsp.py`
+- `raspberry_pi/audio_routing.py`
+- `raspberry_pi/audio_network.py`
+- `raspberry_pi/spk0.py`
+- `raspberry_pi/live_m3c0_full_duplex.py`
+- `docs/SAFIRA_AUDIO_ROUTING.md`
