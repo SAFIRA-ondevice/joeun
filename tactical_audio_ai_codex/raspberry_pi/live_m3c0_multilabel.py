@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from audio_model import AudioCNN
 from decision_logic import decide
-from m3c0 import sync_packet
+from audio_capture import ContinuousCapture
 from self_speech import add_self_speech_arguments, detector_from_args
 
 
@@ -63,9 +63,10 @@ def combine_channel_probabilities(classes, ambient_prob, voice_prob):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--port", default="/dev/ttyUSB1")
-    p.add_argument("--baud", type=int, default=921600)
+    p.add_argument("--baud", type=int, default=1000000)
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--hop", type=float, default=0.25)
+    p.add_argument("--torch-threads", type=int, default=1, help="CPU inference threads; keep capacity for serial capture")
     p.add_argument("--smoothing", type=int, default=4)
     p.add_argument("--channels", type=int, default=3)
     p.add_argument("--threshold", type=float, default=None)
@@ -82,6 +83,9 @@ def main():
         raise SystemExit("M3C0 SAFIRA mode requires 3 channels: ambient L/R + voice")
     if not np.isfinite(a.hop) or a.hop <= 0:
         p.error("--hop must be positive and finite")
+    if a.torch_threads < 1:
+        p.error("--torch-threads must be at least 1")
+    torch.set_num_threads(a.torch_threads)
     detector = detector_from_args(a)
 
     ck = torch.load(a.model, map_location="cpu")
@@ -116,55 +120,31 @@ def main():
             a.yamnet_confidence,
         )
 
-    ambient_ring = deque(maxlen=sr * 2)
-    voice_ring = deque(maxlen=sr * 2)
-    attribution_ring = deque(maxlen=sr)
     history = deque(maxlen=max(1, a.smoothing))
-    since = 0
-    expected = None
-    hop = max(1, int(sr * a.hop))
-
-    with serial.Serial(a.port, a.baud, timeout=2) as s:
+    print(f"[START] port={a.port} baud={a.baud} output=none "
+          f"capture=continuous hop={a.hop}s torch_threads={a.torch_threads}", file=sys.stderr)
+    with serial.Serial(a.port, a.baud, timeout=2, write_timeout=2) as s:
         s.reset_input_buffer()
-        if not a.no_start_command:
-            s.write(b"START_INMP_ONLY\n")
-            s.flush()
-            time.sleep(0.2)
-
-        while True:
-            seq, n, payload = sync_packet(s, a.channels)
-            if n != 320:
-                raise ValueError(f"expected M3C0 320 samples, got {n}")
-            if expected is not None and seq != expected:
-                print(f"[WARN] sequence jump expected={expected} received={seq}", file=sys.stderr)
-                ambient_ring.clear()
-                voice_ring.clear()
-                attribution_ring.clear()
-                history.clear()
-                detector.reset()
-                since = 0
-            expected = (seq + 1) & 0xFFFF
-
-            pcm = np.frombuffer(payload, dtype="<i2").reshape(n, a.channels)
-            ambient = (
-                (
-                    pcm[:, 0].astype(np.int32)
-                    + pcm[:, 1].astype(np.int32)
-                )
-                // 2
-            ).astype(np.int16)
-            voice = pcm[:, 2].astype(np.int16, copy=False)
-
-            ambient_ring.extend(ambient)
-            voice_ring.extend(voice)
-            attribution_ring.extend(pcm.copy())
-            since += n
-
-            if len(ambient_ring) >= sr and len(voice_ring) >= sr and since >= hop:
-                elapsed_seconds = since / sr
-                since = 0
-                ambient_x = np.asarray(ambient_ring, dtype=np.int16)[-sr:]
-                voice_x = np.asarray(voice_ring, dtype=np.int16)[-sr:]
+        # Start the only serial reader before requesting the stream. Do not
+        # leave a 200 ms unread interval after START (about 19 KB at 1 Mbaud).
+        with ContinuousCapture(s, a.hop) as capture:
+            if not a.no_start_command:
+                command = b"START_INMP_ONLY\n"
+                if s.write(command) != len(command):
+                    raise OSError("incomplete START command write")
+                s.flush()
+            while True:
+                window = capture.next_window()
+                if window is None:
+                    print("[RX waiting for contiguous audio] " + json.dumps(capture.stats()), file=sys.stderr)
+                    continue
+                if window.reset:
+                    history.clear()
+                    detector.reset()
+                elapsed_seconds = window.elapsed_seconds
+                pcm = window.pcm
+                ambient_x = ((pcm[:, 0].astype(np.int32) + pcm[:, 1].astype(np.int32)) // 2).astype(np.int16)
+                voice_x = pcm[:, 2]
 
                 t = time.perf_counter()
                 ambient_prob = infer(model, ambient_x, sr, n_mels)
@@ -194,12 +174,16 @@ def main():
                     },
                 }
                 out["speech_source"] = "voice_channel"
-                detector.annotate(out, np.asarray(attribution_ring), classes,
+                detector.annotate(out, pcm, classes,
                                   ambient_prob, voice_prob, thresholds, elapsed_seconds)
                 out["environment_source"] = "ambient_lr_mix"
                 out["inference_ms"] = round(
                     (time.perf_counter() - t) * 1000, 1
                 )
+
+                out["audio_rx"] = capture.stats()
+                out["analysis_window_age_ms"] = round((time.monotonic() - window.received_at) * 1000, 1)
+                out["input_discontinuity_during_inference"] = out["audio_rx"]["generation"] != window.generation
 
                 if a.json:
                     print(json.dumps(out, ensure_ascii=False))
@@ -210,9 +194,15 @@ def main():
                     print(
                         f"[AI] {scores} | => {out['final']} "
                         f"| self={out['self_speech_active']} external_candidate={out['external_speech_candidate']} "
-                        f"| {out['inference_ms']:.1f} ms"
+                        f"| {out['inference_ms']:.1f} ms "
+                        f"| missing={out['audio_rx']['missing_frames_estimate']} "
+                        f"overwritten={out['audio_rx']['overwritten_unconsumed_frames']} "
+                        f"window_age={out['analysis_window_age_ms']:.1f} ms"
                     )
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("[STOP] capture stopped", file=sys.stderr)

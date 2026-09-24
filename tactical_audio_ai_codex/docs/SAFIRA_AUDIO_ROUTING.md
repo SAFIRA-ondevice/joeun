@@ -205,3 +205,50 @@ Existing full-duplex prototype limitations remain: inference runs in the serial
 loop, and the downlink reuses the most recently received frame when no new frame
 arrives (no jitter buffer/expiry). Those transport/playback changes are separate
 follow-ups; this patch preserves that path and makes no end-to-end claim.
+
+## Continuous capture in the receive-only AI entry point
+
+`live_m3c0_multilabel.py` now uses `audio_capture.ContinuousCapture`: one dedicated
+serial reader runs independently of inference and console output. The consumer
+takes the latest contiguous 50 packets (1 s) at each hop. Storage is bounded to
+50 packets; there is no unbounded queue of inference jobs. `--torch-threads`
+defaults to 1 to limit CPU contention. This is not a hard real-time guarantee:
+Python scheduling, CPU/power effects and device/driver buffers still require Pi
+measurements. A slow consumer can skip windows; this is not lossless recording.
+
+The reader starts before START_INMP_ONLY is written and no longer sleeps for
+200 ms with the stream unread. Serial has finite read/write timeouts; shutdown
+cancels the read and joins the reader before closing the port. Receive/parser
+errors propagate to the main thread instead of silently stopping capture.
+This does not introduce STARTED acknowledgement or speaker-mode startup support.
+
+The default runtime baud for this entry point is **1,000,000**, with explicit
+override retained. Other legacy entry points are unchanged. The documented
+3-channel payload needs 964,000 bit/s with 8N1, so 921600 is insufficient.
+
+`audio_rx` reports cumulative packets, forward missing-frame estimates,
+discontinuities, backward/restart events, latest jump, buffer occupancy/capacity
+and high-water mark, overwritten unconsumed frames and skipped analysis hops.
+Normal rolling-window replacement of already-used frames is not counted as an
+unconsumed overwrite. With deliberately large hops, unconsumed overwrites can
+also reflect the selected sampling cadence rather than overloaded inference.
+Modulo-65536 forward gaps below half the sequence range are counted, including
+large jumps; backward/restart cases are reported separately because the header
+has no session identifier. Normal sequence wrap does not reset the window.
+
+Any sequence discontinuity clears the capture window. After 50 contiguous
+packets, the next consumer snapshot resets classifier history and attribution.
+Results whose input was captured before a new discontinuity are tagged
+`input_discontinuity_during_inference=true`; the receive-only script does not
+use those results to play audio. Thread-safe snapshots never splice samples
+across a known gap. Host frame ages and `analysis_window_age_ms` exclude device
+capture time and time waiting in serial/USB buffers; they are not acoustic
+end-to-end latency measurements.
+
+Tests use the actual packet parser with fragmented fake serial reads. They
+withhold the inference consumer while packets keep arriving, verify bounded
+storage/latest-window selection and counters, and cover large gaps, wrap,
+backward jumps, receive errors, invalid frames and blocked-read cancellation.
+Mocked CLI tests check default/override baud and thread settings. No Pi click
+removal has been verified. The full-duplex entry point is not converted by this
+change and retains the limitations listed above.
