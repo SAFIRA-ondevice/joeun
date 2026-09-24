@@ -57,3 +57,11 @@ aplay recordings/*_voice.wav
 ```
 
 각 WAV는 16 kHz, mono, 16-bit PCM입니다.
+
+## AI / full-duplex 및 자기 음성 판단
+
+현재 작업의 실행 코드와 테스트는 `tactical_audio_ai_codex/`에 있습니다.
+[AI README](tactical_audio_ai_codex/README.md)와
+[오디오 라우팅 계약](tactical_audio_ai_codex/docs/SAFIRA_AUDIO_ROUTING.md)을 참고하세요.
+voice reference 기반 자기 음성 gating은 사전 enrollment 없이 동작하는 휴리스틱이며,
+현재 CNN은 분류 모델입니다. 실제 음원분리 또는 자기 음성 PCM 제거는 구현되지 않았습니다.
