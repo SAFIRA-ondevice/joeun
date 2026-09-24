@@ -86,3 +86,31 @@ UDP 전송 시 `SPK0` 8-byte header를 붙여 총 648 bytes입니다.
 - `raspberry_pi/spk0.py`
 - `raspberry_pi/live_m3c0_full_duplex.py`
 - `docs/SAFIRA_AUDIO_ROUTING.md`
+
+### Enrollment 없는 자기 음성 판단
+
+두 live 스크립트는 `raspberry_pi/self_speech.py`로 voice reference와 ambient L/R의
+동기화된 신호를 비교합니다. 시작 시 개인 목소리를 녹음·학습하지 않습니다.
+근접 voice 에너지, 좌우 각각의 정규화 상관관계와 시간차, 같은 구간의 CNN speech
+점수를 사용하며 smoothing/hangover를 적용합니다. 초기 1초 분석 구간 이후
+`--hop` 주기(기본 약 250 ms, 20 ms 프레임 단위)로 상태를 갱신합니다.
+
+- `targets.speech` / `detected`: 기존 voice 마이크 기반 AI 결과 그대로 유지
+- `self_speech_active`: 자기 음성 유입 후보 및 hangover 상태
+- `external_speech_candidate`: 자기 음성 gating을 통과한 외부 음성 후보
+- `routing_detected`: 일반 `speech`를 제거하고 조건을 만족할 때만 `external_speech` 추가
+- `self_speech_metrics`: 상관관계·지연·에너지 진단값, score와 구분됨
+- `self_speech_pcm_removed=false`: PCM에서 자기 목소리를 제거한 것이 아님
+
+외부 speech의 헤드셋 gain은 현재 정책에 정의되어 있지 않아 자동 재생을 추가하지
+않습니다. 혼합 PCM에 drone/gunshot gain이 적용되면 그 안의 자기 음성도 함께
+변합니다. 이를 해결하려면 별도 source separation/self-voice cancellation이 필요합니다.
+동시 발화, 반사음, 마이크 gain 차이 등에서는 오판할 수 있습니다.
+
+`--self-speech-config settings.json`으로 검출 threshold 등을 보정할 수 있습니다.
+설정 키와 실기 검증 항목은 [라우팅 문서](docs/SAFIRA_AUDIO_ROUTING.md)에 있습니다.
+합성 신호/모의 I/O 테스트는 다음과 같이 실행합니다. 실기 end-to-end 검증은 미완료입니다.
+
+```bash
+python3 -m unittest discover -s tests -v
+```

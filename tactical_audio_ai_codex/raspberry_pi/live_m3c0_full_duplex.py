@@ -44,6 +44,7 @@ from live_m3c0_multilabel import (
 )
 from m3c0 import sync_packet
 from spk0 import FRAME_SAMPLES, pack_spk0
+from self_speech import add_self_speech_arguments, detector_from_args
 
 
 def main():
@@ -68,7 +69,11 @@ def main():
     )
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-start-command", action="store_true")
+    add_self_speech_arguments(p)
     a = p.parse_args()
+    if not np.isfinite(a.hop) or a.hop <= 0:
+        p.error("--hop must be positive and finite")
+    detector = detector_from_args(a)
 
     if (a.server_host is None) != (a.uplink_port is None):
         p.error("--server-host and --uplink-port must be supplied together")
@@ -78,6 +83,8 @@ def main():
         raise SystemExit("This script requires task=multilabel checkpoint")
 
     classes = ck["classes"]
+    if "speech" not in [c.lower() for c in classes]:
+        raise SystemExit("self-speech attribution requires a speech class")
     sr = int(ck.get("sample_rate", 16000))
     if sr != 16000:
         raise SystemExit(
@@ -116,8 +123,10 @@ def main():
 
     ambient_ring = deque(maxlen=sr * 2)
     voice_ring = deque(maxlen=sr * 2)
+    attribution_ring = deque(maxlen=sr)
     history = deque(maxlen=max(1, a.smoothing))
     detected = []
+    speech_state = {}
     latest_server_voice = np.zeros(FRAME_SAMPLES, dtype=np.int16)
     since = 0
     hop = max(1, int(sr * a.hop))
@@ -143,6 +152,14 @@ def main():
                         f"[WARN] M3C0 jump expected={expected_m3c0} got={seq}",
                         file=sys.stderr,
                     )
+                    ambient_ring.clear()
+                    voice_ring.clear()
+                    attribution_ring.clear()
+                    history.clear()
+                    detector.reset()
+                    detected = []
+                    speech_state = {}
+                    since = 0
                 expected_m3c0 = (seq + 1) & 0xFFFF
 
                 pcm = np.frombuffer(payload, dtype="<i2").reshape(n, 3)
@@ -157,6 +174,7 @@ def main():
 
                 ambient_ring.extend(ambient)
                 voice_ring.extend(voice)
+                attribution_ring.extend(pcm.copy())
                 since += n
 
                 # Uplink: dedicated user voice x1.0, every 20 ms frame.
@@ -183,6 +201,7 @@ def main():
                     and len(voice_ring) >= sr
                     and since >= hop
                 ):
+                    elapsed_seconds = since / sr
                     since = 0
                     ambient_x = np.asarray(ambient_ring, dtype=np.int16)[-sr:]
                     voice_x = np.asarray(voice_ring, dtype=np.int16)[-sr:]
@@ -197,6 +216,10 @@ def main():
                     prob = np.mean(history, axis=0)
                     result = decide(classes, prob, thresholds)
                     detected = result["detected"]
+                    speech_state = detector.annotate(
+                        result, np.asarray(attribution_ring), classes,
+                        ambient_prob, voice_prob, thresholds, elapsed_seconds,
+                    )
                     result["speech_source"] = "voice_channel"
                     result["environment_source"] = "ambient_lr_mix"
                     result["audio_routing_mode"] = (
@@ -216,6 +239,7 @@ def main():
                         )
                         print(
                             f"[AI] {scores} | => {result['final']} "
+                            f"| self={result['self_speech_active']} external_candidate={result['external_speech_candidate']} "
                             f"| routing=fallback | {result['inference_ms']:.1f} ms"
                         )
 
@@ -225,6 +249,7 @@ def main():
                     ambient,
                     detected,
                     latest_server_voice,
+                    speech_state=speech_state,
                 )
 
                 if a.headset_serial:

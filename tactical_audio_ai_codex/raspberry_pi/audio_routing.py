@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+from self_speech import speech_routing_targets
 
 from audio_dsp import (
     DRONE_GAIN,
@@ -76,6 +77,8 @@ class SafiraAudioRouter:
         ambient_mix: np.ndarray,
         detected,
         server_voice: Optional[np.ndarray] = None,
+        *,
+        speech_state: Optional[dict] = None,
     ) -> tuple[np.ndarray, dict]:
         """Fallback for the current classifier-only prototype.
 
@@ -83,7 +86,10 @@ class SafiraAudioRouter:
         be applied to it. Gunshot has protective priority over drone when both
         are detected. No target -> unknown policy -> mute.
         """
-        active = set(detected)
+        # Speech attribution gates semantic eligibility, never cancels PCM.
+        # No external-speech playback gain is specified in the current policy.
+        routing_targets = speech_routing_targets(detected, speech_state or {})
+        active = set(routing_targets)
         if "gunshot" in active:
             gain, reason = GUNSHOT_GAIN, "gunshot"
         elif "drone" in active:
@@ -101,6 +107,8 @@ class SafiraAudioRouter:
             "routing_mode": "classification_guided_mixed_fallback",
             "ambient_gain": gain,
             "ambient_reason": reason,
+            "routing_detected": routing_targets,
+            "self_speech_pcm_removed": False,
             "warning": "ambient PCM is not source-separated",
         })
         return out, meta

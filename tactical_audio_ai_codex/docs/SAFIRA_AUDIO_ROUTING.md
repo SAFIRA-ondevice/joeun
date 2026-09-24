@@ -82,3 +82,126 @@ python3 raspberry_pi/live_m3c0_full_duplex.py \
 
 Before using `--headset-serial`, confirm the current ESP32 firmware accepts
 `SPK0` playback packets while it is streaming `M3C0`.
+
+## Enrollment-free self-speech attribution
+
+`self_speech.py` compares voice with each ambient side independently. It does
+not learn a voiceprint, subtract a waveform, or implement acoustic echo
+cancellation. Speaker-verification enrollment is a possible future optional
+fallback, not a dependency or a currently implemented feature.
+
+Both live scripts retain synchronized L/R/voice samples for the same trailing
+1 s window used for the CNN. Every inference hop (default 250 ms, rounded up
+to whole 20 ms packets), the detector:
+
+1. Splits that window into 20 ms chunks and removes DC for measurement only.
+2. Computes each side's maximum absolute normalized cross-correlation with
+   voice over +/-32 samples (+/-2 ms). Absolute values tolerate inverted
+   polarity; positive lag means ambient trails the reference.
+3. Requires sufficient voice and ambient energy, a near-voice energy advantage,
+   and sufficient correlation on the **same** ambient side. Either side may
+   provide self leakage evidence. It does not average L/R before this test.
+4. Combines the fraction of matching audible chunks with the unsmoothed voice
+   AND ambient CNN speech scores from that exact window. Thus correlated
+   non-speech alone does not establish self speech.
+5. Smooths evidence and holds self state across short dropouts. Raw self
+   candidates also block external attribution during the smoothing attack.
+6. Marks external speech as a candidate only with ambient speech, audible
+   ambient energy, insufficient reference correlation and no self gate.
+   Correlated speech lacking near-voice evidence remains `uncertain`.
+
+This is inference-cadence attribution, **not a 20 ms identity decision**.
+The startup window is 1 s; trailing-window evidence, smoothing, inference time
+and hangover add latency. Overlapping windows use newly captured sample time
+for smoothing/hangover, not the full window length. A sequence discontinuity
+clears windows, score history and detector state before rebuilding the window.
+Between inferences the full-duplex loop uses the most recent state.
+
+### Output and routing contract
+
+Existing `targets`, `detected`, `final` and `speech_source=voice_channel` retain
+their classifier meaning. They do not identify the speaker. New JSON fields:
+
+| Field | Meaning |
+|---|---|
+| `self_speech_active` | Heuristic self leakage state, including hangover |
+| `external_speech_candidate` | Eligible external-speech candidate after gating |
+| `speech_attribution` | self_candidate / external_candidate / uncertain / no_ambient_speech |
+| `ambient_speech_score`, `voice_speech_score` | Raw aligned CNN probabilities, 0..1 (unlike percent `targets`) |
+| `self_speech_evidence` | Smoothed heuristic evidence, not a calibrated identity probability |
+| `self_speech_raw_candidate` | Unsmooth self candidate; blocks premature external attribution |
+| `self_speech_metrics` | Per-side correlation, lag, RMS, relative energy and vote fractions |
+| `routing_detected` | Environmental labels plus eligible external_speech; never generic speech |
+| `self_speech_pcm_removed` | Always false |
+| `source_separation_available` | Always false in both live paths |
+
+Correlation and dBFS metrics are averaged across chunks; lag is the median
+best lag. These summaries are diagnostics, not additional classifier scores.
+The router applies the same semantic gate even if passed raw `detected` labels.
+Neither self state nor external eligibility changes existing gains. No playback
+gain for external speech has been specified, so it does not enable playback.
+Uplink still sends the dedicated voice channel at x1, including any acoustic
+contamination captured there. Server voice and limiter processing are unchanged.
+
+**Important:** with drone/gunshot in the mixed ambient stream, leaked self voice
+still receives that stream's scalar gain. Gating removes self speech from
+external-speech decisions only. Independent waveform gains require a genuine
+separator; self-voice cancellation requires a separate adaptive acoustic stage.
+
+### Configuration and tuning
+
+Both scripts accept `--self-speech-config settings.json`; omit it for defaults.
+Example overrides (PCM dBFS, not sound-pressure levels):
+
+```json
+{
+  "max_lag_samples": 32,
+  "correlation_threshold": 0.65,
+  "voice_min_dbfs": -40.0,
+  "ambient_min_dbfs": -55.0,
+  "near_voice_ratio_db": 6.0,
+  "evidence_fraction": 0.6,
+  "smoothing_seconds": 0.25,
+  "hangover_seconds": 0.5
+}
+```
+
+These are uncalibrated starting defaults. Set microphone gains consistently;
+measure distance, delay, quiet/noisy speech levels and leakage on the actual
+headset. Tune ratio and correlation against false self/external assignments,
+then smoothing/hangover against missed short words and switching latency.
+CNN speech thresholds still come from the checkpoint or `--threshold`.
+The sample rate/frame settings are fixed to 16000/320 for this implementation.
+
+Reverberation, wind, clipping, AGC differences, shifted microphones, periodic
+sounds and headset playback leakage can invalidate correlation/proximity cues.
+A nearby external speaker can be correlated at all microphones; this may be
+uncertain or falsely self. Concurrent wearer + external speech is not separated:
+strong self evidence suppresses external candidacy for that entire window.
+Low correlation also does not prove a different identity. Opposite-phase L/R
+may cancel in the existing mono ambient CNN input even though this detector
+measures the two sides separately. Therefore this is not reliable speaker ID.
+
+### Validation status and follow-up
+
+Run from the repository root:
+
+```bash
+python3 -m unittest discover -s tactical_audio_ai_codex/tests -v
+```
+
+Synthetic tests cover delayed/inverted leakage, independent speech, silence/DC,
+correlated non-speech, ambiguous far-field audio, one-sided leakage, smoothing,
+hangover, semantic gating, gains and SPK0. Mocked live-entrypoint tests verify
+JSON, uplink/headset framing and sequence-gap resets without a checkpoint or
+devices. They do not measure real-world accuracy or Raspberry Pi throughput.
+
+Hardware validation remains required: wearer-only, external-only, both speaking,
+drone/gunshot mixtures, movement, downlink playback, packet loss, and timing/load
+with the actual checkpoint on Pi. Record synchronized 3-channel samples and
+report false assignments and latency before relying on the heuristic.
+
+Existing full-duplex prototype limitations remain: inference runs in the serial
+loop, and the downlink reuses the most recently received frame when no new frame
+arrives (no jitter buffer/expiry). Those transport/playback changes are separate
+follow-ups; this patch preserves that path and makes no end-to-end claim.

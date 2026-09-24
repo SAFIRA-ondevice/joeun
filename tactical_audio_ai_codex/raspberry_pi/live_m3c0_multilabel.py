@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from audio_model import AudioCNN
 from decision_logic import decide
 from m3c0 import sync_packet
+from self_speech import add_self_speech_arguments, detector_from_args
 
 
 def feature(x, sr, n_mels):
@@ -74,10 +75,14 @@ def main():
     p.add_argument("--yamnet-confidence", type=float, default=0.25)
     p.add_argument("--json", action="store_true")
     p.add_argument("--no-start-command", action="store_true")
+    add_self_speech_arguments(p)
     a = p.parse_args()
 
-    if a.channels < 3:
+    if a.channels != 3:
         raise SystemExit("M3C0 SAFIRA mode requires 3 channels: ambient L/R + voice")
+    if not np.isfinite(a.hop) or a.hop <= 0:
+        p.error("--hop must be positive and finite")
+    detector = detector_from_args(a)
 
     ck = torch.load(a.model, map_location="cpu")
     if ck.get("task") != "multilabel":
@@ -85,6 +90,8 @@ def main():
 
     classes = ck["classes"]
     sr = int(ck.get("sample_rate", 16000))
+    if sr != 16000 or "speech" not in [c.lower() for c in classes]:
+        raise SystemExit("self-speech attribution requires 16 kHz and a speech class")
     n_mels = int(ck.get("n_mels", 64))
     thresholds = {
         c: (
@@ -111,6 +118,7 @@ def main():
 
     ambient_ring = deque(maxlen=sr * 2)
     voice_ring = deque(maxlen=sr * 2)
+    attribution_ring = deque(maxlen=sr)
     history = deque(maxlen=max(1, a.smoothing))
     since = 0
     expected = None
@@ -125,8 +133,16 @@ def main():
 
         while True:
             seq, n, payload = sync_packet(s, a.channels)
+            if n != 320:
+                raise ValueError(f"expected M3C0 320 samples, got {n}")
             if expected is not None and seq != expected:
-                print(f"[WARN] sequence jump expected={expected} received={seq}")
+                print(f"[WARN] sequence jump expected={expected} received={seq}", file=sys.stderr)
+                ambient_ring.clear()
+                voice_ring.clear()
+                attribution_ring.clear()
+                history.clear()
+                detector.reset()
+                since = 0
             expected = (seq + 1) & 0xFFFF
 
             pcm = np.frombuffer(payload, dtype="<i2").reshape(n, a.channels)
@@ -141,9 +157,11 @@ def main():
 
             ambient_ring.extend(ambient)
             voice_ring.extend(voice)
+            attribution_ring.extend(pcm.copy())
             since += n
 
             if len(ambient_ring) >= sr and len(voice_ring) >= sr and since >= hop:
+                elapsed_seconds = since / sr
                 since = 0
                 ambient_x = np.asarray(ambient_ring, dtype=np.int16)[-sr:]
                 voice_x = np.asarray(voice_ring, dtype=np.int16)[-sr:]
@@ -176,6 +194,8 @@ def main():
                     },
                 }
                 out["speech_source"] = "voice_channel"
+                detector.annotate(out, np.asarray(attribution_ring), classes,
+                                  ambient_prob, voice_prob, thresholds, elapsed_seconds)
                 out["environment_source"] = "ambient_lr_mix"
                 out["inference_ms"] = round(
                     (time.perf_counter() - t) * 1000, 1
@@ -189,6 +209,7 @@ def main():
                     )
                     print(
                         f"[AI] {scores} | => {out['final']} "
+                        f"| self={out['self_speech_active']} external_candidate={out['external_speech_candidate']} "
                         f"| {out['inference_ms']:.1f} ms"
                     )
 
