@@ -1,0 +1,23 @@
+[Unit]
+Description=SAFIRA L/R audio and runtime wearer enrollment
+After=local-fs.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=pi
+SupplementaryGroups=dialout
+WorkingDirectory=/home/pi/safira-runtime/tactical_audio_ai_codex
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/default/safira-audio
+ExecStart=/bin/bash /home/pi/safira-runtime/tactical_audio_ai_codex/deploy/run_audio.sh
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=15
+KillSignal=SIGTERM
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

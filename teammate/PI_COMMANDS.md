@@ -1,5 +1,7 @@
 # 팀원용 Pi 설치·시연 명령어
 
+실제 사용 버전은 live_all_mics_reenroll.py (좌우 주변 평균 + voice 참조). 수동 확인 후 [전원 자동 실행 설치](AUTOSTART.md)를 진행한다.
+
 ## 1. 노트북에서 Pi 접속
 
 Pi와 같은 사용자 핫스팟에 연결한 뒤 터미널에서:
@@ -72,7 +74,7 @@ cd /home/pi/safira-runtime/tactical_audio_ai_codex
 python - <<'PY'
 import torch
 from runtime_separator import Separator
-from live_left_only_reenroll import AmbientClassifier
+from live_all_mics_reenroll import AmbientClassifier
 s = torch.load('models/separator_overlap_v1/best.pt', map_location='cpu', weights_only=True)
 assert s.get('task') == 'source_separation_v1', '분리 checkpoint 종류 불일치'
 m = Separator().eval()
@@ -93,7 +95,7 @@ serial 권한 오류가 발생한 경우만 `sudo usermod -aG dialout pi` 실행
 
 ```bash
 cd /home/pi/safira-runtime/tactical_audio_ai_codex
-python -u live_left_only_reenroll.py --model models/separator_overlap_v1/best.pt --classifier-model models/classifier_noise_v1/last.pt --port /dev/ttyUSB0 --baud 1000000 --seconds 120 --speech-gain 1.5 --drone-gain 1.5 --gunshot-gain 0.15 --unknown-gain 1.5 --master 0.01 --combined-gain 1.0
+python -u live_all_mics_reenroll.py --model models/separator_overlap_v1/best.pt --classifier-model models/classifier_noise_v1/last.pt --port /dev/ttyUSB0 --baud 1000000 --seconds 120 --speech-gain 1.5 --drone-gain 1.5 --gunshot-gain 0.15 --unknown-gain 1.5 --master 0.01 --combined-gain 1.0
 ```
 
 처음 3초는 소리를 재생하거나 말하지 않는다. 프로그램은 등록 없이 시작한다. 총/드론 동시에 나와도 전체 감쇠하지 않고 각 추정 stem에 gain을 적용한다. Ctrl+C로 종료하면 녹음을 저장한다. 최대 --seconds 300이며 상시 서비스가 아니다. 녹음이 메모리에 쌓이므로 제한을 임의로 없애지 않는다.
@@ -127,7 +129,7 @@ if [ -f wearer_profile.json ]; then mv wearer_profile.json "wearer_profile.backu
 
 ```bash
 cd /home/pi/safira-runtime/tactical_audio_ai_codex
-ls -td recordings/live_stable_* | head -n 3
+ls -td recordings/live_all_mics_* | head -n 3
 python3 -m http.server 8001 --directory recordings
 ```
 
